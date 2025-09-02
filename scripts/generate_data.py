@@ -72,7 +72,7 @@ def generate_products(out, scale, seed):
     categories = ['Electronics', 'Clothing', 'Home', 'Books']
     subcategories = {'Electronics': ['Phones', 'Computers'], 'Clothing': ['Men', 'Women'], 'Home': ['Furniture', 'Kitchen'], 'Books': ['Fiction', 'Non-fiction']}
     with path.open('w', encoding='utf-8') as f:
-        f.write('product_id,sku,name,category,subcategory,current_price,currency,is_discontinued,introduced_dt,discontinued_dt\n')
+        f.write(f'product_id,sku,name,category,subcategory,current_price,currency,is_discontinued,introduced_dt,discontinued_dt\n')
         for i in range(1, total_rows + 1):
             sku = 'SKU-' + rstr.rstr('A-Z0-9', 6)
             cat = random.choice(categories)
@@ -83,7 +83,7 @@ def generate_products(out, scale, seed):
             discontinued = random.random() < 0.2
             introduced = date(2015,1,1) + timedelta(days=random.randint(0, 3000))
             discontinued_dt = date(2023,1,1) + timedelta(days=random.randint(0, 365)) if discontinued and random.random() > 0.1 else ''
-            f.write(f"{i},{sku},{cat} {subcat} Item,{cat},{subcat},{price:.4f},AUD,{str(discontinued)},{introduced},{discontinued_dt}")
+            f.write(f"{i},{sku},{cat} {subcat} Item,{cat},{subcat},{price:.4f},AUD,{str(discontinued)},{introduced},{discontinued_dt}\n")
     print("products.csv has been generated.")
 
 # Generate stores.csv
@@ -406,7 +406,7 @@ def main():
 
     # generate_exchange_rates(out, args.scale, args.seed)
     # generate_customers(out, args.scale, args.seed)
-    # generate_products(out, args.scale, args.seed)
+    generate_products(out, args.scale, args.seed)
     # generate_stores(out, args.scale, args.seed)
     # generate_suppliers(out, args.scale, args.seed)
     # generate_orders(out, args.scale, args.seed)
@@ -415,7 +415,7 @@ def main():
 
     # generate_returns(out, args.scale, args.seed)
     # generate_events(out, args.scalec
-    generate_shipments(out, args.scale, args.seed)
+    # generate_shipments(out, args.scale, args.seed)
 
     print(f"✅ Sample raw data written to {out}. Expand to full volumes and schemas as needed.")
 
