@@ -1,6 +1,7 @@
 # Generate synthetic raw data locally with controlled edge cases.
 # Usage: python scripts/generate_data.py --seed 42 --out data_raw
 import csv
+from decimal import Decimal
 import argparse, os, pathlib, random
 from datetime import datetime, timedelta, date
 import string
@@ -236,15 +237,6 @@ def generate_sensors(out, scale):
 
 # Generate shipments.parquet
 def generate_shipments(out, scale, seed):
-    # tbl = pa.table({
-    #     'shipment_id': pa.array(range(1, int(1000000 * args.scale) + 1), type=pa.int64()),
-    #     'order_id': pa.array(range(1, int(10000 * args.scale) + 1), type=pa.int64()),
-    #     'carrier': pa.array(['AUSPOST']*int(10000 * args.scale), type=pa.string()),
-    #     'shipped_at': pa.array([datetime(2024,1,1)+timedelta(days=i%90) for i in range(int(10000 * args.scale))], type=pa.timestamp('us')),
-    #     'delivered_at': pa.array([datetime(2024,1,2)+timedelta(days=i%90) for i in range(int(10000 * args.scale))], type=pa.timestamp('us')),
-    #     'ship_cost': pa.array([pa.scalar(1995, type=pa.decimal128(12, 2)) for _ in range(int(10000 * args.scale))], type=pa.decimal128(12, 2)),
-    # })
-    # pq.write_table(tbl, out/'shipments.parquet', compression='snappy')
     total_rows = int(1000000 * scale)
     shipped_dates = [datetime(2024,1,1) + timedelta(days=i%90) for i in range(total_rows)]
     delivered_dates = []
@@ -260,7 +252,7 @@ def generate_shipments(out, scale, seed):
         'carrier': pa.array(['AUSPOST']*total_rows, type=pa.string()),
         'shipped_at': pa.array(shipped_dates, type=pa.timestamp('us')),
         'delivered_at': pa.array(delivered_dates, type=pa.timestamp('us')),
-        'ship_cost': pa.array([1995]*total_rows, type=pa.int64()).cast(pa.decimal128(12,2)),
+        'ship_cost': pa.array([pa.scalar(Decimal("1995.00"), type=pa.decimal128(12, 2)) for _ in range(total_rows)], type=pa.decimal128(12, 2)),
     })
     pq.write_table(tbl, out/'shipments.parquet', compression='snappy')
     print(f"shipments.parquet has been generated with {total_rows} rows.")
@@ -404,17 +396,17 @@ def main():
     out = pathlib.Path(args.out)
     ensure_dir(out)
 
-    generate_exchange_rates(out, args.scale, args.seed)
-    generate_customers(out, args.scale, args.seed)
-    generate_products(out, args.scale, args.seed)
-    generate_stores(out, args.scale, args.seed)
-    generate_suppliers(out, args.scale, args.seed)
-    generate_orders(out, args.scale, args.seed)
-    generate_order_lines(out, args.scale, args.seed)
-    generate_sensors(out, args.scale)
+    # generate_exchange_rates(out, args.scale, args.seed)
+    # generate_customers(out, args.scale, args.seed)
+    # generate_products(out, args.scale, args.seed)
+    # generate_stores(out, args.scale, args.seed)
+    # generate_suppliers(out, args.scale, args.seed)
+    # generate_orders(out, args.scale, args.seed)
+    # generate_order_lines(out, args.scale, args.seed)
+    # generate_sensors(out, args.scale)
 
-    generate_returns(out, args.scale, args.seed)
-    generate_events(out, args.scale)
+    # generate_returns(out, args.scale, args.seed)
+    # generate_events(out, args.scale)
     generate_shipments(out, args.scale, args.seed)
 
     print(f"✅ Sample raw data written to {out}. Expand to full volumes and schemas as needed.")
