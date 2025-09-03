@@ -9,6 +9,10 @@ import pyarrow as pa
 import pyarrow.csv as pacsv
 import pyarrow.dataset as pads
 import pyarrow.parquet as pq
+import pyarrow.dataset as ds
+import pyarrow.json as pajson
+import pandas as pd
+from datetime import datetime
 from schemas.schemas import customers_schema, products_schema, stores_schema, suppliers_schema, orders_header_schema, orders_lines_schema, events_schema, sensors_schema, exchange_rates_schema, shipments_schema, returns_day1_schema
 try:
     from deltalake import write_deltalake
@@ -47,22 +51,14 @@ def already_processed(conn, p):
 
 def mark_processed(conn, p, n, r, status): 
     print('mark processed')
-    conn.execute("INSERT OR REPLACE INTO manifest_processed_files VALUES (?, ?, ?, ?, ?)", 
-                 [str(p), dt.datetime.now(dt.UTC), n, r, status])
-    # print("Table Has been Loaded in the Deltalake.")
+    conn.execute("INSERT OR REPLACE INTO manifest_processed_files VALUES (?, ?, ?, ?, ?)", [str(p), dt.datetime.now(dt.UTC), n, r, status])
 
 # Function to write to parquet, add partitioning
 def write_parquet_partitioned(table, base_path, partitioning=None):
     pads.write_dataset(table, base_dir=str(base_path), format='parquet', partitioning=partitioning, existing_data_behavior='overwrite_or_ignore')
 
 # Function to load data in deltalake
-
-def write_delta(
-    table: pa.Table,
-    base_path: str | pathlib.Path,
-    mode: str = "append",
-    partition_by: list[str] | str | None = None,
-    merge_schema: bool = True
+def write_delta(table: pa.Table, base_path: str | pathlib.Path, mode: str = "append", partition_by: list[str] | str | None = None, merge_schema: bool = True
 ):
     if write_deltalake is None:
         raise RuntimeError("deltalake not installed")
@@ -73,18 +69,51 @@ def write_delta(
     schema_mode = "merge" if merge_schema else None
 
     write_deltalake(
-        table_or_uri=str(base_path),
-        data=table,
-        partition_by=partition_by,
-        mode=mode,
-        schema_mode=schema_mode
+        table_or_uri = str(base_path),
+        data = table,
+        partition_by = partition_by,
+        mode = mode,
+        schema_mode = schema_mode
     )
 
+# Function to handle upsert
+def upsert_delta(table, base_path, merge_schema = True):
+    if write_deltalake is None:
+        raise RuntimeError("deltalake not installed")
 
-# Adds ingestion_ts in AU Time Zone, src_filename and src_row_hash columns 
+    if not isinstance(table, pa.Table):
+        raise TypeError("Expected a pyarrow.Table for `table`")
+
+    schema_mode = "merge" if merge_schema else None
+
+    try:
+        partition_by = "is_deleted" if "is_deleted" in table.schema.names else None
+        write_deltalake(
+            table_or_uri = str(base_path),
+            data = table,
+            mode = "append",
+            schema_mode = schema_mode,
+            partition_by = partition_by
+        )
+        print("UPSERT to Delta Lake successful.")
+    except Exception as e:
+        print(f"Failed to UPSERT to Delta Lake: {e}")
+        raise
+
+def is_valid_partition_folder(folder_name, prefix="order_dt="):
+    if not folder_name.startswith(prefix):
+        return False
+    date_str = folder_name[len(prefix):]
+    try:
+        datetime.strptime(date_str, "%Y-%m-%d")
+        return True
+    except ValueError:
+        return False
+
+# Adds ingestion_ts in US Time Zone, src_filename and src_row_hash columns 
 def add_audit_columns(tbl, src_path):
-    now = pa.scalar(dt.datetime.now(dt.UTC), type=pa.timestamp('ns', tz='Australia/Perth'))
-    ts_col = pa.array([now.as_py()] * len(tbl), type=pa.timestamp('ns', tz='Australia/Perth'))
+    now = pa.scalar(dt.datetime.now(dt.UTC), type=pa.timestamp("us"))
+    ts_col = pa.array([now.as_py()] * len(tbl), type=pa.timestamp("us"))
     src_col = pa.array([str(src_path.name)] * len(tbl))
     hash_col = pa.array([hashlib.md5(str(tbl.slice(i,1)).encode()).hexdigest() for i in range(len(tbl))])
     tbl = tbl.append_column('ingestion_ts', ts_col)
@@ -95,7 +124,7 @@ def add_audit_columns(tbl, src_path):
 # Handles rejected data
 def handle_rejects(tbl, reason, lake_root, src_path):
     reject_path = lake_root/'_rejects'/f"{src_path.stem}_rejects.parquet"
-    tbl = tbl.append_column('reject_reason', pa.array([reason]*len(tbl)))
+    tbl = tbl.append_column('reject_reason', pa.array( [reason] * len(tbl) ))
     pq.write_table(tbl, reject_path)
     print(f"Failed loading {tbl} due to {reason}.")
 
@@ -135,6 +164,7 @@ def load_stores(raw_root, lake_root, conn, dry_run=False):
             write_parquet_partitioned(tbl, pq_base)
             write_delta(tbl, dl_base, mode='append')
         mark_processed(conn, src, len(tbl), 0, 'success')
+        print('stores has been loaded to deltalake.')
     except Exception as e:
         handle_rejects(tbl, str(e), lake_root, src)
         mark_processed(conn, src, 0, len(tbl), 'failed')
@@ -154,6 +184,7 @@ def load_products(raw_root, lake_root, conn, dry_run=False):
             write_parquet_partitioned(tbl, pq_base)
             write_delta(tbl, dl_base, mode='append')
         mark_processed(conn, src, len(tbl), 0, 'success')
+        print('products has been loaded to deltalake.')
     except Exception as e:
         handle_rejects(tbl, str(e), lake_root, src)
         mark_processed(conn, src, 0, len(tbl), 'failed')
@@ -173,8 +204,187 @@ def load_suppliers(raw_root, lake_root, conn, dry_run=False):
             write_parquet_partitioned(tbl, pq_base)
             write_delta(tbl, dl_base, mode='append')
         mark_processed(conn, src, len(tbl), 0, 'success')
+        print('suppliers has been loaded to deltalake.')
     except Exception as e:
         handle_rejects(tbl, str(e), lake_root, src)
+        mark_processed(conn, src, 0, len(tbl), 'failed')
+
+# Load orders from order_lines csv
+def load_orders(raw_root, lake_root, conn, dry_run=False):
+    orders_root = raw_root / 'orders'
+    if not orders_root.exists() or not orders_root.is_dir():
+        print(f"'orders' folder not found in {raw_root}")
+        return
+
+    pq_base = lake_root / 'bronze' / 'parquet' / 'orders'
+    dl_base = lake_root / 'bronze' / 'delta' / 'orders'
+
+    for subfolder in orders_root.iterdir():
+        if not subfolder.is_dir():
+            continue
+
+        folder_name = subfolder.name
+        if not is_valid_partition_folder(folder_name):
+            print(f"Skipping folder '{folder_name}': invalid partition folder format.")
+            continue
+
+        order_dt = folder_name.split('=')[-1]
+
+        for csv_file in subfolder.glob('*.csv'):
+            if already_processed(conn, csv_file): 
+                continue
+
+            tbl = None
+            try:
+                tbl = pacsv.read_csv(csv_file, read_options=pacsv.ReadOptions(encoding='utf-8'))
+                tbl = tbl.cast(orders_header_schema, safe=False)
+                tbl = add_audit_columns(tbl, csv_file)
+
+                # Add partition column
+                tbl = tbl.append_column("order_dt", pa.array([order_dt] * len(tbl)))
+
+                if not dry_run:
+                    write_parquet_partitioned(tbl, pq_base, ["order_dt"])
+                    write_delta(tbl, dl_base, mode='append', partition_by=["order_dt"], merge_schema=True)
+
+                mark_processed(conn, csv_file, len(tbl), 0, 'success')
+                print(f"{csv_file.name} has been loaded to deltalake.")
+            except Exception as e:
+                handle_rejects(tbl, str(e), lake_root, csv_file)
+                mark_processed(conn, csv_file, 0, len(tbl) if tbl else 0, 'failed')
+
+
+
+# Load orders_lines from order_lines csv
+def load_orders_lines(raw_root, lake_root, conn, dry_run=False):
+    orders_lines_root = raw_root / 'orders_lines'
+    if not orders_lines_root.exists() or not orders_lines_root.is_dir():
+        print(f"'orders_lines' folder not found in {raw_root}")
+        return
+
+    pq_base = lake_root / 'bronze' / 'parquet' / 'orders_lines'
+    dl_base = lake_root / 'bronze' / 'delta' / 'orders_lines'
+
+    for subfolder in orders_lines_root.iterdir():
+        if not subfolder.is_dir():
+            continue
+
+        folder_name = subfolder.name
+        if not is_valid_partition_folder(folder_name):
+            print(f"Skipping folder '{folder_name}': invalid partition folder format.")
+            continue
+
+        order_dt = folder_name.split('=')[-1]
+
+        for csv_file in subfolder.glob('*.csv'):
+            if already_processed(conn, csv_file): 
+                continue
+
+            tbl = None
+            try:
+                tbl = pacsv.read_csv(csv_file, read_options=pacsv.ReadOptions(encoding='utf-8'))
+                tbl = tbl.cast(orders_lines_schema, safe=False)
+                tbl = add_audit_columns(tbl, csv_file)
+
+                # Add partition column
+                tbl = tbl.append_column("order_dt", pa.array([order_dt] * len(tbl)))
+
+                if not dry_run:
+                    write_parquet_partitioned(tbl, pq_base, ["order_dt"])
+                    write_delta(tbl, dl_base, mode='append', partition_by=["order_dt"], merge_schema=True)
+
+                mark_processed(conn, csv_file, len(tbl), 0, 'success')
+                print(f"{csv_file.name} has been loaded to deltalake.")
+            except Exception as e:
+                handle_rejects(tbl, str(e), lake_root, csv_file)
+                mark_processed(conn, csv_file, 0, len(tbl) if tbl else 0, 'failed')
+
+# Load sensors from sensors csv
+def load_sensors(raw_root, lake_root, conn, dry_run=False):
+    pq_base = lake_root/'bronze'/'parquet'/'sensors'
+    dl_base = lake_root/'bronze'/'delta'/'sensors'
+    for subfolder in raw_root.iterdir():
+        if subfolder.is_dir():
+            store_id = subfolder.name  # Use folder name as partition value
+            for csv_file in subfolder.glob('store_id=*/month=*/sensors.csv'):
+
+            # if not src.exists(): return
+                if already_processed(conn, csv_file): 
+                    continue
+
+                tbl = None
+                try:
+                    tbl = pacsv.read_csv(csv_file, read_options=pacsv.ReadOptions(encoding='utf-8'))
+                    tbl = tbl.cast(sensors_schema, safe=False)
+                    tbl = add_audit_columns(tbl, csv_file)
+                    
+                    # Add store_id as a column for partitioning
+                    tbl = tbl.append_column("store_id", pa.array([store_id] * len(tbl)))
+
+                    if not dry_run:
+                        write_parquet_partitioned(tbl, pq_base, store_id)
+                        write_delta(tbl, dl_base, mode='append', partition_by=store_id, merge_schema=True)
+                    mark_processed(conn, csv_file, len(tbl), 0, 'success')
+                    print('sensors has been loaded to deltalake.')
+                except Exception as e:
+                    handle_rejects(tbl, str(e), lake_root, csv_file)
+                    mark_processed(conn, csv_file, 0, len(tbl), 'failed')
+
+# Load returns data from parquet file to deltalake
+def load_returns(raw_root, lake_root, conn, dry_run=False):
+    dl_base = lake_root / 'bronze' / 'delta' / 'returns'
+    pq_base = lake_root / 'bronze' / 'parquet' / 'returns'
+    parquet_files = ['returns_day1.parquet', 'returns_day2.parquet']
+
+    for file_name in parquet_files:
+        src = raw_root / file_name
+        if not src.exists():
+            print(f"File {src} does not exist.")
+            continue
+        if already_processed(conn, src):
+            print(f"File {src} already processed.")
+            continue
+        tbl = None
+        try:
+            print(f"Reading Parquet file {src}")
+            tbl = pq.read_table(src)
+            tbl = tbl.cast(returns_day1_schema, safe=False)
+            tbl = add_audit_columns(tbl, src)
+
+            if not dry_run:
+                upsert_delta(tbl, dl_base, merge_schema=True)
+                write_parquet_partitioned(tbl, pq_base)
+
+            mark_processed(conn, src, len(tbl), 0, 'success')
+            print(f"{file_name} has been loaded to Delta Lake.")
+
+        except Exception as e:
+            print(f"Error processing file {src}: {e}")
+            if tbl is not None:
+                handle_rejects(tbl, str(e), lake_root, src)
+            mark_processed(conn, src, 0, len(tbl) if tbl else 0, 'failed')
+
+# Load exchange_rates data from Excel file
+def load_exchange_rates(raw_root, lake_root, conn, dry_run=False):
+    src = raw_root / 'exchange_rates.xlsx'
+    if not src.exists(): return
+    if already_processed(conn, src): return
+    try:
+        # Read Excel file 
+        df = pd.read_excel(src)
+        tbl = pa.Table.from_pandas(df)
+        tbl = tbl.cast(exchange_rates_schema, safe=False)
+        tbl = add_audit_columns(tbl, src)
+        if not dry_run:
+            pq_base = lake_root / 'bronze' / 'parquet' / 'exchange_rates'
+            dl_base = lake_root / 'bronze' / 'delta' / 'exchange_rates'
+            write_parquet_partitioned(tbl, pq_base)
+            write_delta(tbl, dl_base, mode='append')
+        mark_processed(conn, src, len(tbl), 0, 'success')
+        print('exchange_rates has been loaded to deltalake.')
+    except Exception as e:
+        handle_rejects(tbl, str(e), lake_root, src)
+        print('error loading exchange_rates into deltalake.')
         mark_processed(conn, src, 0, len(tbl), 'failed')
 
 def main():
@@ -191,6 +401,11 @@ def main():
     # load_stores(raw_root, lake_root, conn, dry_run=args.dry_run)
     # load_products(raw_root, lake_root, conn, dry_run=args.dry_run)
     # load_suppliers(raw_root, lake_root, conn, dry_run=args.dry_run)
+    # load_orders(raw_root, lake_root, conn, dry_run=args.dry_run)
+    load_orders_lines(raw_root, lake_root, conn, dry_run=args.dry_run)
+    # load_sensors(raw_root, lake_root, conn, dry_run=args.dry_run)
+    # load_returns(raw_root, lake_root, conn, dry_run=args.dry_run)
+    # load_exchange_rates(raw_root, lake_root, conn, dry_run=args.dry_run)
 
 
     print("✅ Bronze load completed for implemented loaders (extend for all tables).")
