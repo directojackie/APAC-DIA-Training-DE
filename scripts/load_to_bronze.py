@@ -100,6 +100,7 @@ def upsert_delta(table, base_path, merge_schema = True):
         print(f"Failed to UPSERT to Delta Lake: {e}")
         raise
 
+# Validate Partition folders by order_date
 def is_valid_partition_folder(folder_name, prefix="order_dt="):
     if not folder_name.startswith(prefix):
         return False
@@ -109,6 +110,15 @@ def is_valid_partition_folder(folder_name, prefix="order_dt="):
         return True
     except ValueError:
         return False
+
+# Validate Month
+def is_valid_month(month_str):
+    try:
+        datetime.strptime(month_str, "%Y-%m")
+        return True
+    except ValueError:
+        return False
+
 
 # Adds ingestion_ts in US Time Zone, src_filename and src_row_hash columns 
 def add_audit_columns(tbl, src_path):
@@ -253,8 +263,6 @@ def load_orders(raw_root, lake_root, conn, dry_run=False):
                 handle_rejects(tbl, str(e), lake_root, csv_file)
                 mark_processed(conn, csv_file, 0, len(tbl) if tbl else 0, 'failed')
 
-
-
 # Load orders_lines from order_lines csv
 def load_orders_lines(raw_root, lake_root, conn, dry_run=False):
     orders_lines_root = raw_root / 'orders_lines'
@@ -301,34 +309,62 @@ def load_orders_lines(raw_root, lake_root, conn, dry_run=False):
 
 # Load sensors from sensors csv
 def load_sensors(raw_root, lake_root, conn, dry_run=False):
-    pq_base = lake_root/'bronze'/'parquet'/'sensors'
-    dl_base = lake_root/'bronze'/'delta'/'sensors'
-    for subfolder in raw_root.iterdir():
-        if subfolder.is_dir():
-            store_id = subfolder.name  # Use folder name as partition value
-            for csv_file in subfolder.glob('store_id=*/month=*/sensors.csv'):
+    sensors_root = raw_root / 'sensors'
+    if not sensors_root.exists() or not sensors_root.is_dir():
+        print(f"'sensors' folder not found in {raw_root}")
+        return
 
-            # if not src.exists(): return
-                if already_processed(conn, csv_file): 
-                    continue
+    pq_base = lake_root / 'bronze' / 'parquet' / 'sensors'
+    dl_base = lake_root / 'bronze' / 'delta' / 'sensors'
 
-                tbl = None
-                try:
-                    tbl = pacsv.read_csv(csv_file, read_options=pacsv.ReadOptions(encoding='utf-8'))
-                    tbl = tbl.cast(sensors_schema, safe=False)
-                    tbl = add_audit_columns(tbl, csv_file)
-                    
-                    # Add store_id as a column for partitioning
+    for store_folder in sensors_root.iterdir():
+        if not store_folder.is_dir() or not store_folder.name.startswith("store_id="):
+            continue
+
+        store_id = store_folder.name.split("=")[-1]
+
+        for month_folder in store_folder.iterdir():
+            if not month_folder.is_dir() or not month_folder.name.startswith("month="):
+                continue
+
+            month = month_folder.name.split("=")[-1]
+            if not is_valid_month(month):
+                print(f"Skipping folder '{month_folder.name}': invalid month format.")
+                continue
+
+            csv_file = month_folder / 'sensors.csv'
+            if not csv_file.exists():
+                continue
+
+            if already_processed(conn, csv_file): 
+                continue
+
+            tbl = None
+            try:
+                tbl = pacsv.read_csv(csv_file, read_options=pacsv.ReadOptions(encoding='utf-8'))
+                tbl = tbl.cast(sensors_schema, safe=False)
+                tbl = add_audit_columns(tbl, csv_file)
+
+                # ✅ Add partition columns only if not already present
+                if "store_id" not in tbl.schema.names:
                     tbl = tbl.append_column("store_id", pa.array([store_id] * len(tbl)))
+                else:
+                    tbl = tbl.set_column(tbl.schema.get_field_index("store_id"), "store_id", pa.array([store_id] * len(tbl)))
 
-                    if not dry_run:
-                        write_parquet_partitioned(tbl, pq_base, store_id)
-                        write_delta(tbl, dl_base, mode='append', partition_by=store_id, merge_schema=True)
-                    mark_processed(conn, csv_file, len(tbl), 0, 'success')
-                    print('sensors has been loaded to deltalake.')
-                except Exception as e:
-                    handle_rejects(tbl, str(e), lake_root, csv_file)
-                    mark_processed(conn, csv_file, 0, len(tbl), 'failed')
+                if "month" not in tbl.schema.names:
+                    tbl = tbl.append_column("month", pa.array([month] * len(tbl)))
+                else:
+                    tbl = tbl.set_column(tbl.schema.get_field_index("month"), "month", pa.array([month] * len(tbl)))
+
+                if not dry_run:
+                    pq.write_to_dataset(tbl, root_path=pq_base, partition_cols=["store_id", "month"])
+                    write_delta(tbl, dl_base, mode='append', partition_by=["store_id", "month"], merge_schema=True)
+
+                mark_processed(conn, csv_file, len(tbl), 0, 'success')
+                print(f"{csv_file.name} has been loaded to deltalake.")
+            except Exception as e:
+                handle_rejects(tbl, str(e), lake_root, csv_file)
+                mark_processed(conn, csv_file, 0, len(tbl) if tbl else 0, 'failed')
 
 # Load returns data from parquet file to deltalake
 def load_returns(raw_root, lake_root, conn, dry_run=False):
@@ -387,6 +423,31 @@ def load_exchange_rates(raw_root, lake_root, conn, dry_run=False):
         print('error loading exchange_rates into deltalake.')
         mark_processed(conn, src, 0, len(tbl), 'failed')
 
+# Load shipments from shipments.parquet to deltalake
+def load_shipments(raw_root, lake_root, conn, dry_run=False):
+    src = raw_root / 'shipments.parquet'
+    pq_base = lake_root / 'bronze' / 'parquet' / 'shipments'
+    dl_base = lake_root / 'bronze' / 'delta' / 'shipments'
+    if not src.exists():
+        return
+    if already_processed(conn, src):
+        return
+    try:
+        tbl = pq.read_table(src)
+        tbl = tbl.cast(shipments_schema, safe=False)
+        tbl = add_audit_columns(tbl, src)
+        if not dry_run:
+
+            write_parquet_partitioned(tbl, pq_base)
+            write_delta(tbl, dl_base, mode='append')
+        mark_processed(conn, src, len(tbl), 0, 'success')
+        print('shipments has been loaded to deltalake.')
+    except Exception as e:
+        handle_rejects(tbl, str(e), lake_root, src)
+        print('error loading shipments into deltalake.')
+        mark_processed(conn, src, 0, len(tbl), 'failed')
+
+
 def main():
     args = parse_args()
     raw_root = pathlib.Path(args.raw)
@@ -402,10 +463,11 @@ def main():
     # load_products(raw_root, lake_root, conn, dry_run=args.dry_run)
     # load_suppliers(raw_root, lake_root, conn, dry_run=args.dry_run)
     # load_orders(raw_root, lake_root, conn, dry_run=args.dry_run)
-    load_orders_lines(raw_root, lake_root, conn, dry_run=args.dry_run)
+    # load_orders_lines(raw_root, lake_root, conn, dry_run=args.dry_run)
     # load_sensors(raw_root, lake_root, conn, dry_run=args.dry_run)
     # load_returns(raw_root, lake_root, conn, dry_run=args.dry_run)
     # load_exchange_rates(raw_root, lake_root, conn, dry_run=args.dry_run)
+    load_shipments(raw_root, lake_root, conn, dry_run=args.dry_run)
 
 
     print("✅ Bronze load completed for implemented loaders (extend for all tables).")
