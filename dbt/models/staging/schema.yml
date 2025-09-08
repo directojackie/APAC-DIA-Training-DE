@@ -1,87 +1,175 @@
 version: 2
 
 models:
-# Tests for orders_lines
-  - name: orders_lines
-    description: "Incremental model for order line items with pricing, discount, and tax details."
+# Tests for customers model
+  - name: customers
+    description: >
+      Cleaned customer data with standardized types and audit fields.
     columns:
-      - name: order_id
-        description: "Unique identifier for the order."
-        tests:
-          - not_null
-          - unique
-
-      - name: line_number
-        description: "Line item number within the order."
-        tests:
-          - not_null
-
-      - name: product_id
-        description: "Identifier for the product in the line item."
-        tests:
-          - not_null
-
-      - name: quantity
-        description: "Quantity of the product ordered."
-        tests:
-          - not_null
-
-      - name: unit_price
-        description: "Unit price of the product at the time of order."
-
-      - name: line_discount_pct
-        description: "Discount percentage applied to the line item."
-
-      - name: tax_pct
-        description: "Tax percentage applied to the line item."
-
-      - name: ingestion_ts
-        description: "Timestamp when the record was ingested into the bronze layer."
-        tests:
-          - not_null
-
-  # Tests for orders
-  - name: orders_header
-    description: "Incremental model for order headers containing order metadata and payment details."
-    columns:
-      - name: order_id
-        description: "Unique identifier for the order."
-        tests:
-          - not_null
-          - unique
-
-      - name: order_ts
-        description: "Timestamp when the order was placed."
-
-      - name: order_dt_local
-        description: "Local date of the order."
-
       - name: customer_id
-        description: "Identifier for the customer who placed the order."
-        tests:
-          - not_null
+        description: Unique identifier for the customer.
+        tests: [not_null, unique]
 
-      - name: store_id
-        description: "Identifier for the store where the order was placed."
-        tests:
-          - not_null
-      - name: order_channel
-        description: "Sales channel through which the order was placed."
+      - name: natural_key
+        description: Natural business key for the customer.
 
-      - name: payment_method
-        description: "Payment method used for the order."
+      - name: first_name
+        description: Customer's first name.
 
-      - name: coupon_code
-        description: "Coupon code applied to the order, if any."
+      - name: last_name
+        description: Customer's last name.
 
-      - name: shipping_fee
-        description: "Shipping fee charged for the order."
+      - name: email
+        description: Email address of the customer.
+
+      - name: phone
+        description: Phone number.
+
+      - name: address_line1
+      - name: address_line2
+      - name: city
+      - name: state_region
+      - name: postcode
+      - name: country_code
+
+      - name: latitude
+        description: Latitude of customer's location.
+
+      - name: longitude
+        description: Longitude of customer's location.
+
+      - name: birth_date
+        description: Date of birth.
+
+      - name: join_ts_utc
+        description: Timestamp when customer joined.
+
+      - name: is_vip
+        description: Whether the customer is a VIP.
+
+      - name: gdpr_consent
+        description: GDPR consent flag.
+
+# Tests for products model
+  - name: products
+    description: >
+      Product master data including pricing and lifecycle status.
+    columns:
+      - name: product_id
+        description: Unique product identifier.
+        tests: [not_null, unique]
+
+      - name: product_sku
+      - name: product_name
+      - name: product_category
+      - name: product_subcategory
+
+      - name: current_price
+        description: Current price of the product.
 
       - name: currency
-        description: "Currency used for the transaction."
+        description: Currency code.
 
+      - name: is_discontinued
+        description: Whether the product is discontinued.
+
+      - name: introduced_dt
+        description: Date product was introduced.
+
+      - name: discontinued_dt
+        description: Date product was discontinued.
+
+# Tests for stores model
+  - name: stores
+    description: >
+      Store metadata including location and operational dates.
+    columns:
+      - name: store_id
+        description: Unique store identifier.
+        tests: [not_null, unique]
+
+      - name: store_code
+      - name: store_name
+      - name: store_channel
+      - name: store_region
+      - name: store_state
+
+      - name: latitude
+      - name: longitude
+
+      - name: open_dt
+        description: Store opening date.
+
+      - name: close_dt
+        description: Store closing date.
+
+# Tests for suppliers model
+  - name: suppliers
+    description: >
+      Supplier master data with lead times and preference flags.
+    columns:
+      - name: supplier_id
+        description: Unique supplier identifier.
+        tests: [not_null, unique]
+
+      - name: supplier_code
+      - name: supplier_name
+      - name: country_code
+
+      - name: lead_time_days
+        description: Lead time in days.
+
+      - name: is_preferred
+        description: Whether the supplier is preferred.
+
+# Tests for orders model
+  - name: orders
+    description: >
+      Incremental orders data with ingestion timestamp for freshness tracking.
+    columns:
+      - name: order_id
+        description: Unique order identifier.
+        tests: [not_null, unique]
+
+      - name: order_ts
+        description: Timestamp of the order.
+
+      - name: order_dt_local
+        description: Local date of the order.
+
+      - name: customer_id
+      - name: store_id
+      - name: order_channel
+      - name: payment_method
+      - name: coupon_code
+
+      - name: shipping_fee
+        description: Shipping fee charged.
+
+      - name: currency
       - name: ingestion_ts
-        description: "Timestamp when the record was ingested into the bronze layer."
+        description: Timestamp when the order was ingested.
+
+# Tests for exchange_rates model
+  - name: exchange_rates
+    description: >
+      Cleaned and typed exchange rates data sourced from bronze_exchange_rates_parquet.
+    columns:
+      - name: date
+        description: Date of the exchange rate.
+        tests:
+          - not_null
+          - unique
+
+      - name: currency
+        description: Currency code (e.g., USD, EUR).
         tests:
           - not_null
 
+      - name: rate_to_aud
+        description: Exchange rate to AUD with precision up to 8 decimal places.
+        tests:
+          - not_null
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 0.00000001
+              max_value: 1000
